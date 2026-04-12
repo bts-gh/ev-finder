@@ -2,12 +2,12 @@ import requests
 import argparse
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 from tzlocal import get_localzone
 
 # Configuration Constants
-MIN_EV_THRESHOLD = 0.015 # 1.5% edge minimum against sharp books
+MIN_EV_THRESHOLD = 0.005 # 0.5% edge minimum against sharp books
 
 def setup_logging(verbose):
     level = logging.DEBUG if verbose else logging.INFO
@@ -22,8 +22,10 @@ def epoch_to_est(epoch_time):
         return None
 
 class EVFinder:
-    def __init__(self, league, odds_variance, api_key, bankroll, sportsbook):
-        self.league = league.lower()
+    def __init__(self, leagues, odds_variance, api_key, bankroll, sportsbook):
+        if isinstance(leagues, str):
+            leagues = [leagues]
+        self.leagues = [l.lower() for l in leagues]
         self.odds_variance = odds_variance
         self.api_key = api_key
         self.bankroll = bankroll
@@ -32,32 +34,45 @@ class EVFinder:
 
     def fetch_odds(self):
         url = "https://api.the-odds-api.com/v3/odds"
-        sport_param = "basketball_nba" if self.league == "nba" else "baseball_mlb"
-        
-        param_us = {"api_key": self.api_key, "sport": sport_param, "region": "us", "mkt": "h2h"}
-        param_eu = {"api_key": self.api_key, "sport": sport_param, "region": "eu", "mkt": "h2h"}
-        
-        logging.debug(f"Fetching Odds API data for {sport_param} (US and EU)...")
-        try:
-            response_us = self.session.get(url, params=param_us, timeout=15)
-            response_us.raise_for_status()
-            data_us = response_us.json().get("data", [])
+        all_data_us = []
+        for league in self.leagues:
+            if league == "nba":
+                sport_param = "basketball_nba"
+            elif league == "mlb":
+                sport_param = "baseball_mlb"
+            elif league == "nhl":
+                sport_param = "icehockey_nhl"
+            elif league == "nfl":
+                sport_param = "americanfootball_nfl"
+            else:
+                continue
             
-            response_eu = self.session.get(url, params=param_eu, timeout=15)
-            data_eu = response_eu.json().get("data", [])
-            requests_left = response_eu.headers.get("x-requests-remaining", "Unknown")
-            logging.debug(f"Odds API Requests Remaining: {requests_left}")
+            param_us = {"api_key": self.api_key, "sport": sport_param, "region": "us", "mkt": "h2h"}
+            param_eu = {"api_key": self.api_key, "sport": sport_param, "region": "eu", "mkt": "h2h"}
+            
+            logging.debug(f"Fetching Odds API data for {sport_param} (US and EU)...")
+            try:
+                response_us = self.session.get(url, params=param_us, timeout=15)
+                response_us.raise_for_status()
+                data_us = response_us.json().get("data", [])
+                
+                response_eu = self.session.get(url, params=param_eu, timeout=15)
+                data_eu = response_eu.json().get("data", [])
+                requests_left = response_eu.headers.get("x-requests-remaining", "Unknown")
+                logging.debug(f"Odds API Requests Remaining: {requests_left}")
 
-            # Merge EU sites (like Pinnacle) into US game objects
-            eu_dict = {g['id']: g for g in data_eu if 'id' in g}
-            for game in data_us:
-                if game['id'] in eu_dict:
-                    game.setdefault('sites', []).extend(eu_dict[game['id']].get('sites', []))
-
-            return data_us
-        except Exception as e:
-            logging.error(f"Error fetching Odds API: {e}")
-            return []
+                # Merge EU sites (like Pinnacle) into US game objects
+                eu_dict = {g['id']: g for g in data_eu if 'id' in g}
+                for game in data_us:
+                    game['league'] = league.upper()
+                    if game['id'] in eu_dict:
+                        game.setdefault('sites', []).extend(eu_dict[game['id']].get('sites', []))
+                        
+                all_data_us.extend(data_us)
+            except Exception as e:
+                logging.error(f"Error fetching Odds API for {sport_param}: {e}")
+        
+        return all_data_us
 
     def find_best_odds(self, game, home_index):
         # sharp book tracking
@@ -122,13 +137,23 @@ class EVFinder:
             logging.info("No games found or error fetching odds.")
             return
 
-        pick_list = []
-        pick_count = 0
+        pick_list_today = []
+        pick_list_tomorrow = []
+        pick_count_today = 0
+        pick_count_tomorrow = 0
         game_num = 0
+        current_time = datetime.now(get_localzone())
+        tomorrow_date = (current_time + timedelta(days=1)).date()
 
         for game in games:
             game_num += 1
             game_time = epoch_to_est(game['commence_time'])
+            
+            # Exclude live or past games
+            if game_time and game_time < current_time:
+                if getattr(self, 'verbose', False):
+                    logging.debug(f'Skipped #{game_num} - {game["teams"][0]} vs {game["teams"][1]} (Game is already live or past)')
+                continue
             
             # Identify Home/Away
             home_team_name = game['home_team']
@@ -158,24 +183,27 @@ class EVFinder:
             away_profit = best_away_odds - 1
             away_ev = (fair_away_prob * away_profit) - ((1 - fair_away_prob) * 1)
 
+            league_str = game.get('league', '')
             logging.debug(f'============================================')
-            logging.debug(f"#{game_num} — {game_time.strftime('%m-%d-%Y %I:%M:%S %p')}")
+            logging.debug(f"#{game_num} [{league_str}] — {game_time.strftime('%m-%d-%Y %I:%M:%S %p')}")
             logging.debug(f"{away_team} @ {home_team}")
             logging.debug(f"|| Sharp ({sharp_source}): \t{sharp_away} / {sharp_home}")
             logging.debug(f"|| True Prob: \t{round(fair_away_prob*100, 2)}%\t/ {round(fair_home_prob*100, 2)}%")
             logging.debug(f"|| Best Line: \t{best_away_odds} ({a_site})\t/ {best_home_odds} ({h_site})")
             logging.debug(f"|| EV ($1):   \t${round(away_ev, 3)}\t\t/ ${round(home_ev, 3)}")
 
-            pick_formatted = f'{away_team} ({best_away_odds}) @ {home_team} ({best_home_odds})'
+            pick_formatted = f'[{league_str}] {away_team} ({best_away_odds}) @ {home_team} ({best_home_odds})'
 
+            # Evaluate picks against Edge Threshold
             # Evaluate picks against Edge Threshold
             if away_ev > MIN_EV_THRESHOLD:
                 kelly_frac = ( (best_away_odds - 1) * fair_away_prob - (1 - fair_away_prob) ) / (best_away_odds - 1)
                 kelly_pct = max(0, round(kelly_frac * 100, 2))
                 s_kelly = round(kelly_pct * 0.25, 2) # 0.25 Fractional Kelly
                 
-                if game_time and game_time.day == datetime.today().day:
-                    pick_list.append({
+                if game_time:
+                    pick_data = {
+                        'league': league_str,
                         'team': away_team.upper(),
                         'ev': away_ev,
                         'book': a_site.upper(),
@@ -184,16 +212,22 @@ class EVFinder:
                         'pick_formatted': pick_formatted,
                         'game_num': game_num,
                         'game_time': game_time
-                    })
-                    pick_count += 1
+                    }
+                    if game_time.date() == current_time.date():
+                        pick_list_today.append(pick_data)
+                        pick_count_today += 1
+                    elif game_time.date() == tomorrow_date:
+                        pick_list_tomorrow.append(pick_data)
+                        pick_count_tomorrow += 1
                 
             if home_ev > MIN_EV_THRESHOLD:
                 kelly_frac = ( (best_home_odds - 1) * fair_home_prob - (1 - fair_home_prob) ) / (best_home_odds - 1)
                 kelly_pct = max(0, round(kelly_frac * 100, 2))
                 s_kelly = round(kelly_pct * 0.25, 2)
                 
-                if game_time and game_time.day == datetime.today().day:
-                    pick_list.append({
+                if game_time:
+                    pick_data = {
+                        'league': league_str,
                         'team': home_team.upper(),
                         'ev': home_ev,
                         'book': h_site.upper(),
@@ -202,27 +236,54 @@ class EVFinder:
                         'pick_formatted': pick_formatted,
                         'game_num': game_num,
                         'game_time': game_time
-                    })
-                    pick_count += 1
+                    }
+                    if game_time.date() == current_time.date():
+                        pick_list_today.append(pick_data)
+                        pick_count_today += 1
+                    elif game_time.date() == tomorrow_date:
+                        pick_list_tomorrow.append(pick_data)
+                        pick_count_tomorrow += 1
 
             logging.debug(f'============================================\n')
 
         # Output Recommendations
-        logging.info(f'[{datetime.today().strftime("%m-%d-%Y %I:%M:%S %p")}] Today\'s Recommended Top-Down Picks ({pick_count}):')
-        logging.info(f'============================================\n')
-        
-        pick_list.sort(key=lambda x: x['ev'], reverse=True)
         current_bankroll = self.bankroll
         
-        if not pick_list:
+        # Today's Picks
+        logging.info(f'[{current_time.strftime("%m-%d-%Y")}] Today\'s Recommended Top-Down Picks ({pick_count_today}):')
+        logging.info(f'============================================\n')
+        
+        pick_list_today.sort(key=lambda x: x['ev'], reverse=True)
+        
+        if not pick_list_today:
             logging.info("No recommended +EV picks found for today's match-ups.")
             logging.info('')
             
-        for p in pick_list:
+        for p in pick_list_today:
             bet_amt = current_bankroll * (p['s_kelly'] / 100.0)
             current_bankroll -= bet_amt
             
-            pick_str = f"[{p['team']}] [EV: +{round(p['ev']*100, 2)}%] [Book: {p['book']}] [Odds: {p['odds']}] [Rec Stake: {p['s_kelly']}% BNK / ${round(bet_amt, 2)}]"
+            pick_str = f"[{p.get('league', '')}] [{p['team']}] [EV: +{round(p['ev']*100, 2)}%] [Book: {p['book']}] [Odds: {p['odds']}] [Rec Stake: {p['s_kelly']}% BNK / ${round(bet_amt, 2)}]"
+            full_str = f"#{p['game_num']}\t{p['game_time'].strftime('%I:%M:%S %p')} - {pick_str}\n\t{p['pick_formatted']}"
+            
+            logging.info(full_str)
+            logging.info('')
+
+        # Tomorrow's Picks
+        logging.info(f'[{tomorrow_date.strftime("%m-%d-%Y")}] Tomorrow\'s Recommended Top-Down Picks ({pick_count_tomorrow}):')
+        logging.info(f'============================================\n')
+        
+        pick_list_tomorrow.sort(key=lambda x: x['ev'], reverse=True)
+        
+        if not pick_list_tomorrow:
+            logging.info("No recommended +EV picks found for tomorrow's match-ups.")
+            logging.info('')
+            
+        for p in pick_list_tomorrow:
+            bet_amt = current_bankroll * (p['s_kelly'] / 100.0)
+            current_bankroll -= bet_amt
+            
+            pick_str = f"[{p.get('league', '')}] [{p['team']}] [EV: +{round(p['ev']*100, 2)}%] [Book: {p['book']}] [Odds: {p['odds']}] [Rec Stake: {p['s_kelly']}% BNK / ${round(bet_amt, 2)}]"
             full_str = f"#{p['game_num']}\t{p['game_time'].strftime('%I:%M:%S %p')} - {pick_str}\n\t{p['pick_formatted']}"
             
             logging.info(full_str)
@@ -230,9 +291,9 @@ class EVFinder:
 
 def main():
     parser = argparse.ArgumentParser(description="EV Finder - Pinnacle Top-Down Devigging Strategy")
-    parser.add_argument('--league', type=str, default='nba', choices=['nba', 'mlb'], help='League to analyze (nba or mlb)')
-    parser.add_argument('--variance', type=float, default=0.05, help='Odds variance modifier (no longer heavily used in devigging but preserved for extension)')
-    parser.add_argument('--bankroll', type=float, default=5.00, help='Total bankroll available for Kelly sizing (default 5.00)')
+    parser.add_argument('--league', type=str, nargs='+', default=['nba'], choices=['nba', 'mlb', 'nhl', 'nfl'], help='League(s) to analyze (e.g. --league nba nhl)')
+    parser.add_argument('--variance', type=float, default=0.005, help='Odds variance modifier (no longer heavily used in devigging but preserved for extension)')
+    parser.add_argument('--bankroll', type=float, default=100.00, help='Total bankroll available for Kelly sizing (default 100.00)')
     parser.add_argument('--book', type=str, default=None, help='Target a specific sportsbook (e.g. fanduel, betmgm, draftkings)')
     parser.add_argument('--verbose', action='store_true', help='Enable verbose debug logging')
     args = parser.parse_args()
@@ -245,8 +306,9 @@ def main():
         logging.error("ERROR: API_KEY not found in environment variables or .env file.")
         return
 
-    logging.info(f"Initializing Top-Down EV Finder for {args.league.upper()}...")
-    finder = EVFinder(league=args.league, odds_variance=args.variance, api_key=api_key, bankroll=args.bankroll, sportsbook=args.book)
+    leagues_str = ", ".join(args.league).upper()
+    logging.info(f"Initializing Top-Down EV Finder for {leagues_str}...")
+    finder = EVFinder(leagues=args.league, odds_variance=args.variance, api_key=api_key, bankroll=args.bankroll, sportsbook=args.book)
     finder.process_games()
 
 if __name__ == "__main__":
