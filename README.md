@@ -1,5 +1,8 @@
 # EV Finder
 
+> [!IMPORTANT]
+> **This script was primarily created and optimized for binary moneyline (head-to-head) odds.**
+
 EV Finder is a top-down expected value (EV) betting tool that uses market-sharp odds (like Pinnacle and Betfair) to calculate true probabilities with the vig removed via a multiplicative method. It then line-shops across domestic sportsbooks to find +EV (positive expected value) bets and recommends a fractional Kelly unit size.
 
 ## Features
