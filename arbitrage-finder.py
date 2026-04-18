@@ -36,7 +36,7 @@ class ArbitrageFinder:
 
     def fetch_odds(self):
         all_data = []
-        bookmakers_str = "draftkings,betmgm,fanduel"
+        bookmakers_str = "draftkings,betmgm,fanduel,pinnacle,marathonbet"
         if self.sportsbook and self.sportsbook.lower() not in bookmakers_str:
             bookmakers_str += f",{self.sportsbook.lower()}"
             
@@ -91,6 +91,16 @@ class ArbitrageFinder:
         return all_data
 
     def find_arbitrage_odds(self, game, market):
+        """
+        Scans all permitted sportsbooks to find the absolute maximum odds available 
+        for both the Home/Over side and Away/Under side of a specific market.
+        
+        Edge Case Handling:
+        - Points Matching: For Spreads and Totals, it groups offerings strictly by their exact 
+          point value. This prevents falsely identifying an arbitrage between mismatched lines 
+          (e.g. Over 215.5 on Book A and Under 216.5 on Book B).
+        - Missing Data: Skips books missing price or point data.
+        """
         best_home_odds = 0.0
         best_away_odds = 0.0
         best_home_site = None
@@ -104,8 +114,9 @@ class ArbitrageFinder:
         if self.sportsbook:
             allowed_books = [self.sportsbook.lower()]
         else:
-            allowed_books = ['draftkings', 'betmgm', 'fanduel', 'pinnacle', 'betfair_ex_eu', 'betfair_ex_uk', 'marathonbet']
+            allowed_books = ['draftkings', 'betmgm', 'fanduel', 'pinnacle', 'marathonbet']
 
+        # Group offerings by point value to ensure we only arb identical lines
         offerings_by_point = {}
         
         for bookmaker in game.get("bookmakers", []):
@@ -122,20 +133,36 @@ class ArbitrageFinder:
                             home_outcome = next((o for o in outcomes if o["name"] == "Over"), None)
                             away_outcome = next((o for o in outcomes if o["name"] == "Under"), None)
                         else:
+                            # Edge case: European books (like Marathonbet) often return 3-way moneylines (Regulation Only) 
+                            # under the 'h2h' key, which include a 'Draw' outcome. 
+                            # Comparing a 3-way ML against a 2-way ML is mathematically invalid and creates false arbs/EV.
+                            if len(outcomes) > 2:
+                                continue
+                                
                             home_outcome = next((o for o in outcomes if o["name"] == home_team), None)
                             away_outcome = next((o for o in outcomes if o["name"] == away_team), None)
                             
                         if not home_outcome or not away_outcome:
                             continue
                             
-                        home_price = home_outcome["price"]
-                        away_price = away_outcome["price"]
+                        home_price = home_outcome.get("price")
+                        away_price = away_outcome.get("price")
+                        
+                        # Edge case: Ensure valid pricing exists (odds > 1.0)
+                        if not home_price or not away_price or home_price <= 1.0 or away_price <= 1.0:
+                            continue
                         
                         if market in ["spreads", "totals"]:
                             point = home_outcome.get("point")
                             away_pt = away_outcome.get("point")
+                            
+                            # Edge case: A point spread/total without a point value cannot be safely arbed
+                            if point is None or away_pt is None:
+                                continue
+                                
                             point_tuple = (point, away_pt)
                         else:
+                            # H2H does not utilize points
                             point_tuple = (None, None)
                             
                         if point_tuple not in offerings_by_point:
@@ -205,9 +232,11 @@ class ArbitrageFinder:
 
             best_home_odds, best_away_odds, h_site, a_site, sharp_points_home, sharp_points_away, margin = self.find_arbitrage_odds(game, market)
             
+            # Edge case: Ensure valid odds were found for both sides of the market
             if best_home_odds == 0 or best_away_odds == 0:
                 continue
                 
+            # Edge case: Arbitrage margin must be strictly less than 1.0 (or whatever threshold) to guarantee profit
             if margin >= 1.0 - MIN_ARB_THRESHOLD:
                 continue
                 
@@ -222,9 +251,14 @@ class ArbitrageFinder:
                 home_team_name_pick = home_team
                 away_team_name_pick = away_team
 
+            # Calculate exact guaranteed profit margin percentage
             profit_margin = 1.0 / margin - 1.0
 
+            # Wagering Strategy (Arbitrage)
+            # Standardize on a $100 total investment across both legs to easily demonstrate proportional split
             total_stake = 100.0
+            
+            # Edge case: Safely handle stakes to avoid ZeroDivisionError (though checked earlier via margin check)
             home_stake = total_stake * ((1/best_home_odds) / margin)
             away_stake = total_stake * ((1/best_away_odds) / margin)
             guaranteed_payout = home_stake * best_home_odds

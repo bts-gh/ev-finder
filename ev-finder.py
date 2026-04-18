@@ -134,6 +134,12 @@ class EVFinder:
                             home_outcome = next((o for o in outcomes if o["name"] == "Over"), None)
                             away_outcome = next((o for o in outcomes if o["name"] == "Under"), None)
                         else:
+                            # Edge case: European books (like Marathonbet) often return 3-way moneylines (Regulation Only) 
+                            # under the 'h2h' key, which include a 'Draw' outcome. 
+                            # Comparing a 3-way ML against a 2-way ML is mathematically invalid and creates false arbs/EV.
+                            if len(outcomes) > 2:
+                                continue
+                                
                             home_outcome = next((o for o in outcomes if o["name"] == home_team), None)
                             away_outcome = next((o for o in outcomes if o["name"] == away_team), None)
                             
@@ -170,6 +176,8 @@ class EVFinder:
                                 home_outcome = next((o for o in outcomes if o["name"] == "Over"), None)
                                 away_outcome = next((o for o in outcomes if o["name"] == "Under"), None)
                             else:
+                                if len(outcomes) > 2:
+                                    continue
                                 home_outcome = next((o for o in outcomes if o["name"] == home_team), None)
                                 away_outcome = next((o for o in outcomes if o["name"] == away_team), None)
                                 
