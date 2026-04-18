@@ -23,6 +23,14 @@ def string_to_est(time_str):
         logging.error(f"Time conversion error: {e}")
         return None
 
+def decimal_to_american(decimal_odds):
+    if decimal_odds >= 2.0:
+        return f"+{int(round((decimal_odds - 1) * 100))}"
+    elif decimal_odds > 1.0:
+        return f"{int(round(-100 / (decimal_odds - 1)))}"
+    else:
+        return "N/A"
+
 class EVFinder:
     def __init__(self, leagues, markets, odds_variance, api_key, bankroll, sportsbooks=None):
         if isinstance(leagues, str):
@@ -103,7 +111,7 @@ class EVFinder:
     def find_best_odds(self, game, market):
         """
         Iterates over the available sportsbooks for a game to find the sharpest reference line,
-        and then line-shops across allowed domestic books for the best available odds.
+        and then extracts all available domestic lines.
         For spreads and totals, it strictly enforces that the point value matches the sharp line.
         """
         sharp_home = 0.0
@@ -112,10 +120,7 @@ class EVFinder:
         sharp_points_home = None
         sharp_points_away = None
         
-        best_home_odds = 0.0
-        best_away_odds = 0.0
-        best_home_site = None
-        best_away_site = None
+        domestic_lines = []
         
         home_team = game.get('home_team')
         away_team = game.get('away_team')
@@ -197,18 +202,16 @@ class EVFinder:
                             home_odds_cand = home_outcome["price"]
                             away_odds_cand = away_outcome["price"]
 
-                            if home_odds_cand > best_home_odds:
-                                best_home_odds = home_odds_cand
-                                best_home_site = bookmaker["key"]
-                                
-                            if away_odds_cand > best_away_odds:
-                                best_away_odds = away_odds_cand
-                                best_away_site = bookmaker["key"]
+                            domestic_lines.append({
+                                'site': bookmaker["key"],
+                                'home_odds': home_odds_cand,
+                                'away_odds': away_odds_cand
+                            })
                             break
                 except (KeyError, ValueError):
                     continue
 
-        return sharp_home, sharp_away, sharp_source, best_home_odds, best_away_odds, best_home_site, best_away_site, sharp_points_home, sharp_points_away
+        return sharp_home, sharp_away, sharp_source, sharp_points_home, sharp_points_away, domestic_lines
 
     def calc_fair_prob(self, sharp_home, sharp_away):
         """
@@ -273,7 +276,7 @@ class EVFinder:
             market = game.get("market", "h2h")
 
             # Extract the sharp reference line and compare against domestic books
-            sharp_home, sharp_away, sharp_source, best_home_odds, best_away_odds, h_site, a_site, sharp_points_home, sharp_points_away = self.find_best_odds(game, market)
+            sharp_home, sharp_away, sharp_source, sharp_points_home, sharp_points_away, domestic_lines = self.find_best_odds(game, market)
             
             # Format team names for pick output
             matchup_str = f"{away_team} @ {home_team}"
@@ -293,18 +296,10 @@ class EVFinder:
                     logging.debug(f'Skipped #{game_num} - {matchup_str} ({market}) (No Sharp odds available)')
                 continue
             # Require domestic odds to line shop against
-            if best_home_odds == 0 or best_away_odds == 0:
+            if not domestic_lines:
                  continue
 
             fair_home_prob, fair_away_prob = self.calc_fair_prob(sharp_home, sharp_away)
-
-            # EV calculation (1 unit bet)
-            # EV = (Win Prob * Profit) - (Loss Prob * Bet)
-            home_profit = best_home_odds - 1
-            home_ev = (fair_home_prob * home_profit) - ((1 - fair_home_prob) * 1)
-            
-            away_profit = best_away_odds - 1
-            away_ev = (fair_away_prob * away_profit) - ((1 - fair_away_prob) * 1)
 
             league_str = game.get('league', '')
             logging.debug(f'============================================')
@@ -312,65 +307,79 @@ class EVFinder:
             logging.debug(f"{away_team_name_pick} @ {home_team_name_pick}")
             logging.debug(f"|| Sharp ({sharp_source}): \t{sharp_away} / {sharp_home}")
             logging.debug(f"|| True Prob: \t{round(fair_away_prob*100, 2)}%\t/ {round(fair_home_prob*100, 2)}%")
-            logging.debug(f"|| Best Line: \t{best_away_odds} ({a_site})\t/ {best_home_odds} ({h_site})")
-            logging.debug(f"|| EV ($1):   \t${round(away_ev, 3)}\t\t/ ${round(home_ev, 3)}")
 
-            pick_formatted = f'[{league_str}] [{market.upper()}] {away_team_name_pick} ({best_away_odds}) / {home_team_name_pick} ({best_home_odds}) [{matchup_str}]'
+            for line in domestic_lines:
+                best_home_odds = line['home_odds']
+                best_away_odds = line['away_odds']
+                h_site = line['site']
+                a_site = line['site']
 
-            # Evaluate picks against Edge Threshold
-            if away_ev > MIN_EV_THRESHOLD:
-                kelly_frac = ( (best_away_odds - 1) * fair_away_prob - (1 - fair_away_prob) ) / (best_away_odds - 1)
-                kelly_pct = max(0, round(kelly_frac * 100, 2))
-                s_kelly = round(kelly_pct * 1.00, 2) # 0.25-1 Fractional Kelly
+                # EV calculation (1 unit bet)
+                home_profit = best_home_odds - 1
+                home_ev = (fair_home_prob * home_profit) - ((1 - fair_home_prob) * 1)
                 
-                if game_time:
-                    pick_data = {
-                        'league': league_str,
-                        'market': market,
-                        'team': away_team_name_pick.upper(),
-                        'ev': away_ev,
-                        'book': a_site.upper(),
-                        'odds': best_away_odds,
-                        'sharp_odds': sharp_away,
-                        'sharp_source': sharp_source,
-                        's_kelly': s_kelly,
-                        'pick_formatted': pick_formatted,
-                        'game_num': game_num,
-                        'game_time': game_time
-                    }
-                    if game_time.date() == current_time.date():
-                        pick_list_today.append(pick_data)
-                        pick_count_today += 1
-                    elif game_time.date() == tomorrow_date:
-                        pick_list_tomorrow.append(pick_data)
-                        pick_count_tomorrow += 1
-                
-            if home_ev > MIN_EV_THRESHOLD:
-                kelly_frac = ( (best_home_odds - 1) * fair_home_prob - (1 - fair_home_prob) ) / (best_home_odds - 1)
-                kelly_pct = max(0, round(kelly_frac * 100, 2))
-                s_kelly = round(kelly_pct * 0.25, 2)
-                
-                if game_time:
-                    pick_data = {
-                        'league': league_str,
-                        'market': market,
-                        'team': home_team_name_pick.upper(),
-                        'ev': home_ev,
-                        'book': h_site.upper(),
-                        'odds': best_home_odds,
-                        'sharp_odds': sharp_home,
-                        'sharp_source': sharp_source,
-                        's_kelly': s_kelly,
-                        'pick_formatted': pick_formatted,
-                        'game_num': game_num,
-                        'game_time': game_time
-                    }
-                    if game_time.date() == current_time.date():
-                        pick_list_today.append(pick_data)
-                        pick_count_today += 1
-                    elif game_time.date() == tomorrow_date:
-                        pick_list_tomorrow.append(pick_data)
-                        pick_count_tomorrow += 1
+                away_profit = best_away_odds - 1
+                away_ev = (fair_away_prob * away_profit) - ((1 - fair_away_prob) * 1)
+
+                logging.debug(f"|| {h_site.upper()} Line: \t{best_away_odds}\t/ {best_home_odds}")
+                logging.debug(f"|| {h_site.upper()} EV ($1): \t${round(away_ev, 3)}\t\t/ ${round(home_ev, 3)}")
+
+                pick_formatted = f'[{league_str}] [{market.upper()}] {away_team_name_pick} ({best_away_odds}) / {home_team_name_pick} ({best_home_odds}) [{matchup_str}]'
+
+                # Evaluate picks against Edge Threshold
+                if away_ev > MIN_EV_THRESHOLD:
+                    kelly_frac = ( (best_away_odds - 1) * fair_away_prob - (1 - fair_away_prob) ) / (best_away_odds - 1)
+                    kelly_pct = max(0, round(kelly_frac * 100, 2))
+                    s_kelly = round(kelly_pct * 1.00, 2) # 0.25-1 Fractional Kelly
+                    
+                    if game_time:
+                        pick_data = {
+                            'league': league_str,
+                            'market': market,
+                            'team': away_team_name_pick.upper(),
+                            'ev': away_ev,
+                            'book': a_site.upper(),
+                            'odds': best_away_odds,
+                            'sharp_odds': sharp_away,
+                            'sharp_source': sharp_source,
+                            's_kelly': s_kelly,
+                            'pick_formatted': pick_formatted,
+                            'game_num': game_num,
+                            'game_time': game_time
+                        }
+                        if game_time.date() == current_time.date():
+                            pick_list_today.append(pick_data)
+                            pick_count_today += 1
+                        elif game_time.date() == tomorrow_date:
+                            pick_list_tomorrow.append(pick_data)
+                            pick_count_tomorrow += 1
+                    
+                if home_ev > MIN_EV_THRESHOLD:
+                    kelly_frac = ( (best_home_odds - 1) * fair_home_prob - (1 - fair_home_prob) ) / (best_home_odds - 1)
+                    kelly_pct = max(0, round(kelly_frac * 100, 2))
+                    s_kelly = round(kelly_pct * 0.25, 2)
+                    
+                    if game_time:
+                        pick_data = {
+                            'league': league_str,
+                            'market': market,
+                            'team': home_team_name_pick.upper(),
+                            'ev': home_ev,
+                            'book': h_site.upper(),
+                            'odds': best_home_odds,
+                            'sharp_odds': sharp_home,
+                            'sharp_source': sharp_source,
+                            's_kelly': s_kelly,
+                            'pick_formatted': pick_formatted,
+                            'game_num': game_num,
+                            'game_time': game_time
+                        }
+                        if game_time.date() == current_time.date():
+                            pick_list_today.append(pick_data)
+                            pick_count_today += 1
+                        elif game_time.date() == tomorrow_date:
+                            pick_list_tomorrow.append(pick_data)
+                            pick_count_tomorrow += 1
 
             logging.debug(f'============================================\n')
 
@@ -391,7 +400,7 @@ class EVFinder:
             bet_amt = current_bankroll * (p['s_kelly'] / 100.0)
             current_bankroll -= bet_amt
             
-            pick_str = f"[{p.get('league', '')}] [{p['team']}] [EV: +{round(p['ev']*100, 2)}%] [Book: {p['book']}] [Odds: {p['odds']}] [Sharp: {p['sharp_odds']} ({p['sharp_source']})] [Rec Stake: {p['s_kelly']}% BNK / ${round(bet_amt, 2)}]"
+            pick_str = f"[{p.get('league', '')}] [{p['team']}] [EV: +{round(p['ev']*100, 2)}%] [Book: {p['book']}] [Odds: {p['odds']} ({decimal_to_american(p['odds'])})] [Sharp: {p['sharp_odds']} ({decimal_to_american(p['sharp_odds'])}) ({p['sharp_source']})] [Rec Stake: {p['s_kelly']}% BNK / ${round(bet_amt, 2)}]"
             full_str = f"#{p['game_num']}\t{p['game_time'].strftime('%I:%M:%S %p')} - {pick_str}\n\t{p['pick_formatted']}"
             
             logging.info(full_str)
@@ -411,7 +420,7 @@ class EVFinder:
             bet_amt = current_bankroll * (p['s_kelly'] / 100.0)
             current_bankroll -= bet_amt
             
-            pick_str = f"[{p.get('league', '')}] [{p['team']}] [EV: +{round(p['ev']*100, 2)}%] [Book: {p['book']}] [Odds: {p['odds']}] [Sharp: {p['sharp_odds']} ({p['sharp_source']})] [Rec Stake: {p['s_kelly']}% BNK / ${round(bet_amt, 2)}]"
+            pick_str = f"[{p.get('league', '')}] [{p['team']}] [EV: +{round(p['ev']*100, 2)}%] [Book: {p['book']}] [Odds: {p['odds']} ({decimal_to_american(p['odds'])})] [Sharp: {p['sharp_odds']} ({decimal_to_american(p['sharp_odds'])}) ({p['sharp_source']})] [Rec Stake: {p['s_kelly']}% BNK / ${round(bet_amt, 2)}]"
             full_str = f"#{p['game_num']}\t{p['game_time'].strftime('%I:%M:%S %p')} - {pick_str}\n\t{p['pick_formatted']}"
             
             logging.info(full_str)
