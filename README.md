@@ -56,10 +56,10 @@ Initializing Top-Down EV Finder for NBA, NHL [H2H, SPREADS, TOTALS]...
 [04-18-2026] Today's Recommended Top-Down Picks (2):
 ============================================
 
-#1  07:30:00 PM - [BOS Celtics] [EV: +2.15%] [Book: FANDUEL] [Odds: 2.10] [Rec Stake: 1.25% BNK / $1.25]
+#1  07:30:00 PM - [BOS Celtics] [EV: +2.15%] [Book: FANDUEL] [Odds: 2.10] [Sharp: 1.98 (PINNACLE)] [Rec Stake: 1.25% BNK / $1.25]
     [NBA] [H2H] BOS Celtics (2.10) / NY Knicks (1.80) [BOS Celtics @ NY Knicks]
 
-#2  08:00:00 PM - [OVER 216.5] [EV: +1.85%] [Book: DRAFTKINGS] [Odds: 1.95] [Rec Stake: 0.90% BNK / $0.90]
+#2  08:00:00 PM - [OVER 216.5] [EV: +1.85%] [Book: DRAFTKINGS] [Odds: 1.95] [Sharp: 1.88 (PINNACLE)] [Rec Stake: 0.90% BNK / $0.90]
     [NBA] [TOTALS] UNDER 216.5 (1.85) / OVER 216.5 (1.95) [Atlanta Hawks @ New York Knicks]
 
 ```
@@ -73,5 +73,6 @@ Each recommendation provides the following details:
 * **EV (+X.XX%)**: The expected value, representing your mathematical long-term profit margin over the true probability (sharp odds with vig removed).
 * **Book**: The domestic sportsbook offering the best odds.
 * **Odds**: The decimal odds being offered at the recommended book.
+* **Sharp**: The sharp odds and their source (e.g., Pinnacle) used to calculate the true probability.
 * **Rec Stake**: Recommended bet size based on a 0.25 Fractional Kelly Criterion. Provided as a percentage of your total bankroll (`% BNK`) and the actual cash amount (`$`).
 * **Match-up Details**: The second line provides the league (e.g., `[NBA]`), market (`[H2H]`, `[SPREADS]`, `[TOTALS]`), the detailed odds comparison between the two sides (including point values if applicable), and the game match-up.

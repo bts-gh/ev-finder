@@ -56,11 +56,14 @@ class EVFinder:
                 
                 logging.debug(f"Fetching Odds API data for {sport_param} - {mkt} (US and EU)...")
                 try:
+                    # Fetch US bookmakers
                     response_us = self.session.get(url, params=param_us, timeout=15)
                     response_us.raise_for_status()
                     data_us = response_us.json().get("data", [])
                     
+                    # Fetch EU/Sharp bookmakers
                     response_eu = self.session.get(url, params=param_eu, timeout=15)
+                    response_eu.raise_for_status()
                     data_eu = response_eu.json().get("data", [])
                     requests_left = response_eu.headers.get("x-requests-remaining", "Unknown")
                     logging.debug(f"Odds API Requests Remaining: {requests_left}")
@@ -80,6 +83,11 @@ class EVFinder:
         return all_data_us
 
     def find_best_odds(self, game, home_index, market):
+        """
+        Iterates over the available sportsbooks for a game to find the sharpest reference line,
+        and then line-shops across allowed domestic books for the best available odds.
+        For spreads and totals, it strictly enforces that the point value matches the sharp line.
+        """
         # sharp book tracking
         sharp_home = 0.0
         sharp_away = 0.0
@@ -184,13 +192,21 @@ class EVFinder:
         return sharp_home, sharp_away, sharp_source, best_home_odds, best_away_odds, best_home_site, best_away_site, sharp_points_home, sharp_points_away
 
     def calc_fair_prob(self, sharp_home, sharp_away):
-        # Calculate vig-free probability via multiplicative method
+        """
+        Calculates vig-free (true) probabilities using the multiplicative method.
+        Requires decimal odds.
+        """
         if sharp_home <= 1.0 or sharp_away <= 1.0:
             return 0.0, 0.0
+            
         implied_home_prob = 1 / sharp_home
         implied_away_prob = 1 / sharp_away
         margin = implied_home_prob + implied_away_prob
         
+        # Edge case: Avoid division by zero if margin is somehow 0
+        if margin == 0:
+            return 0.0, 0.0
+            
         fair_home = implied_home_prob / margin
         fair_away = implied_away_prob / margin
         return fair_home, fair_away
@@ -211,22 +227,38 @@ class EVFinder:
 
         for game in games:
             game_num += 1
-            game_time = epoch_to_est(game['commence_time'])
             
-            # Exclude live or past games
-            if game_time and game_time < current_time:
+            # Parse and validate the game's start time
+            commence_time = game.get('commence_time')
+            if not commence_time:
+                logging.debug(f'Skipped #{game_num} - Missing commence_time')
+                continue
+                
+            game_time = epoch_to_est(commence_time)
+            if not game_time:
+                continue # Skip if time conversion failed
+            
+            # Exclude live or past games to avoid betting on unavailable lines
+            if game_time < current_time:
                 if getattr(self, 'verbose', False):
-                    logging.debug(f'Skipped #{game_num} - {game["teams"][0]} vs {game["teams"][1]} (Game is already live or past)')
+                    teams = game.get("teams", ["Unknown", "Unknown"])
+                    logging.debug(f'Skipped #{game_num} - {teams[0]} vs {teams[-1]} (Game is already live or past)')
                 continue
             
-            # Identify Home/Away
-            home_team_name = game['home_team']
-            home_index = 1 if home_team_name in game["teams"][1] else 0
-            
-            home_team = game["teams"][home_index]
-            away_team = game["teams"][not home_index]
+            # Safely identify Home and Away teams
+            try:
+                home_team_name = game['home_team']
+                home_index = 1 if home_team_name in game["teams"][1] else 0
+                
+                home_team = game["teams"][home_index]
+                away_team = game["teams"][not home_index]
+            except (KeyError, IndexError):
+                logging.debug(f'Skipped #{game_num} - Malformed team data: {game.get("teams")}')
+                continue
+                
             market = game.get("market", "h2h")
 
+            # Extract the sharp reference line and compare against domestic books
             sharp_home, sharp_away, sharp_source, best_home_odds, best_away_odds, h_site, a_site, sharp_points_home, sharp_points_away = self.find_best_odds(game, home_index, market)
             
             # Format team names for pick output
@@ -285,6 +317,8 @@ class EVFinder:
                         'ev': away_ev,
                         'book': a_site.upper(),
                         'odds': best_away_odds,
+                        'sharp_odds': sharp_away,
+                        'sharp_source': sharp_source,
                         's_kelly': s_kelly,
                         'pick_formatted': pick_formatted,
                         'game_num': game_num,
@@ -310,6 +344,8 @@ class EVFinder:
                         'ev': home_ev,
                         'book': h_site.upper(),
                         'odds': best_home_odds,
+                        'sharp_odds': sharp_home,
+                        'sharp_source': sharp_source,
                         's_kelly': s_kelly,
                         'pick_formatted': pick_formatted,
                         'game_num': game_num,
@@ -341,7 +377,7 @@ class EVFinder:
             bet_amt = current_bankroll * (p['s_kelly'] / 100.0)
             current_bankroll -= bet_amt
             
-            pick_str = f"[{p.get('league', '')}] [{p['team']}] [EV: +{round(p['ev']*100, 2)}%] [Book: {p['book']}] [Odds: {p['odds']}] [Rec Stake: {p['s_kelly']}% BNK / ${round(bet_amt, 2)}]"
+            pick_str = f"[{p.get('league', '')}] [{p['team']}] [EV: +{round(p['ev']*100, 2)}%] [Book: {p['book']}] [Odds: {p['odds']}] [Sharp: {p['sharp_odds']} ({p['sharp_source']})] [Rec Stake: {p['s_kelly']}% BNK / ${round(bet_amt, 2)}]"
             full_str = f"#{p['game_num']}\t{p['game_time'].strftime('%I:%M:%S %p')} - {pick_str}\n\t{p['pick_formatted']}"
             
             logging.info(full_str)
@@ -361,7 +397,7 @@ class EVFinder:
             bet_amt = current_bankroll * (p['s_kelly'] / 100.0)
             current_bankroll -= bet_amt
             
-            pick_str = f"[{p.get('league', '')}] [{p['team']}] [EV: +{round(p['ev']*100, 2)}%] [Book: {p['book']}] [Odds: {p['odds']}] [Rec Stake: {p['s_kelly']}% BNK / ${round(bet_amt, 2)}]"
+            pick_str = f"[{p.get('league', '')}] [{p['team']}] [EV: +{round(p['ev']*100, 2)}%] [Book: {p['book']}] [Odds: {p['odds']}] [Sharp: {p['sharp_odds']} ({p['sharp_source']})] [Rec Stake: {p['s_kelly']}% BNK / ${round(bet_amt, 2)}]"
             full_str = f"#{p['game_num']}\t{p['game_time'].strftime('%I:%M:%S %p')} - {pick_str}\n\t{p['pick_formatted']}"
             
             logging.info(full_str)
