@@ -13,9 +13,11 @@ def setup_logging(verbose):
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(level=level, format='%(message)s')
 
-def epoch_to_est(epoch_time):
+def string_to_est(time_str):
     try:
-        est_time = datetime.fromtimestamp(epoch_time, tz=timezone.utc).astimezone(get_localzone())
+        dt = datetime.strptime(time_str, "%Y-%m-%dT%H:%M:%SZ")
+        dt = dt.replace(tzinfo=timezone.utc)
+        est_time = dt.astimezone(get_localzone())
         return est_time
     except Exception as e:
         logging.error(f"Time conversion error: {e}")
@@ -36,8 +38,11 @@ class EVFinder:
         self.session = requests.Session()
 
     def fetch_odds(self):
-        url = "https://api.the-odds-api.com/v3/odds"
-        all_data_us = []
+        all_data = []
+        bookmakers_str = "pinnacle,betfair_ex_eu,betfair_ex_uk,marathonbet,draftkings,betmgm,fanduel"
+        if self.sportsbook and self.sportsbook.lower() not in bookmakers_str:
+            bookmakers_str += f",{self.sportsbook.lower()}"
+            
         for league in self.leagues:
             if league == "nba":
                 sport_param = "basketball_nba"
@@ -50,56 +55,64 @@ class EVFinder:
             else:
                 continue
             
-            for mkt in self.markets:
-                param_us = {"api_key": self.api_key, "sport": sport_param, "region": "us", "mkt": mkt}
-                param_eu = {"api_key": self.api_key, "sport": sport_param, "region": "eu", "mkt": mkt}
+            url = f"https://api.the-odds-api.com/v4/sports/{sport_param}/odds"
+            params = {
+                "api_key": self.api_key,
+                "bookmakers": bookmakers_str,
+                "markets": ",".join(self.markets)
+            }
+            
+            logging.debug(f"Fetching Odds API v4 data for {sport_param} - Markets: {','.join(self.markets)}...")
+            try:
+                response = self.session.get(url, params=params, timeout=15)
+                response.raise_for_status()
+                data = response.json()
                 
-                logging.debug(f"Fetching Odds API data for {sport_param} - {mkt} (US and EU)...")
-                try:
-                    # Fetch US bookmakers
-                    response_us = self.session.get(url, params=param_us, timeout=15)
-                    response_us.raise_for_status()
-                    data_us = response_us.json().get("data", [])
-                    
-                    # Fetch EU/Sharp bookmakers
-                    response_eu = self.session.get(url, params=param_eu, timeout=15)
-                    response_eu.raise_for_status()
-                    data_eu = response_eu.json().get("data", [])
-                    requests_left = response_eu.headers.get("x-requests-remaining", "Unknown")
-                    logging.debug(f"Odds API Requests Remaining: {requests_left}")
+                requests_left = response.headers.get("x-requests-remaining", "Unknown")
+                logging.debug(f"Odds API Requests Remaining: {requests_left}")
 
-                    # Merge EU sites (like Pinnacle) into US game objects
-                    eu_dict = {g['id']: g for g in data_eu if 'id' in g}
-                    for game in data_us:
-                        game['league'] = league.upper()
-                        game['market'] = mkt
-                        if game['id'] in eu_dict:
-                            game.setdefault('sites', []).extend(eu_dict[game['id']].get('sites', []))
-                            
-                    all_data_us.extend(data_us)
-                except Exception as e:
-                    logging.error(f"Error fetching Odds API for {sport_param} - {mkt}: {e}")
+                # Explode the single game response by requested markets so process_games remains relatively unchanged
+                for raw_game in data:
+                    for mkt in self.markets:
+                        game_copy = dict(raw_game)
+                        game_copy['league'] = league.upper()
+                        game_copy['market'] = mkt
+                        all_data.append(game_copy)
+                        
+            except requests.exceptions.HTTPError as e:
+                if e.response is not None and e.response.status_code in [400, 401, 429]:
+                    try:
+                        error_data = e.response.json()
+                        if error_data.get("status") == "EXCEEDED_REQ_LIMIT" or error_data.get("error_code") == "OUT_OF_USAGE_CREDITS":
+                            logging.error("CRITICAL: Odds API Quota Exceeded. Halting further API requests.")
+                            return all_data
+                    except ValueError:
+                        pass
+                logging.error(f"Error fetching Odds API for {sport_param}: {e}")
+            except Exception as e:
+                logging.error(f"Error fetching Odds API for {sport_param}: {e}")
         
-        return all_data_us
+        return all_data
 
-    def find_best_odds(self, game, home_index, market):
+    def find_best_odds(self, game, market):
         """
         Iterates over the available sportsbooks for a game to find the sharpest reference line,
         and then line-shops across allowed domestic books for the best available odds.
         For spreads and totals, it strictly enforces that the point value matches the sharp line.
         """
-        # sharp book tracking
         sharp_home = 0.0
         sharp_away = 0.0
         sharp_source = "None"
         sharp_points_home = None
         sharp_points_away = None
         
-        # targeted line shopping tracking
         best_home_odds = 0.0
         best_away_odds = 0.0
         best_home_site = None
         best_away_site = None
+        
+        home_team = game.get('home_team')
+        away_team = game.get('away_team')
         
         if self.sportsbook:
             allowed_books = [self.sportsbook.lower()]
@@ -107,85 +120,77 @@ class EVFinder:
             allowed_books = ['draftkings', 'betmgm', 'fanduel']
 
         # 1. Find Sharp Odds First
-        for site in game.get("sites", []):
+        for bookmaker in game.get("bookmakers", []):
             try:
-                site_key = site["site_key"].lower()
+                site_key = bookmaker["key"].lower()
                 if site_key not in ['pinnacle', 'betfair_ex_eu', 'betfair_ex_uk', 'marathonbet']:
                     continue
                 
-                if market == "h2h":
-                    h2h = site["odds"]["h2h"]
-                    home_odds_cand = h2h[home_index]
-                    away_odds_cand = h2h[not home_index]
-                    if sharp_home == 0.0 or site_key == 'pinnacle':
-                        sharp_home = home_odds_cand
-                        sharp_away = away_odds_cand
-                        sharp_source = site_key.upper()
-                elif market == "spreads":
-                    spreads = site["odds"]["spreads"]
-                    home_odds_cand = spreads["odds"][home_index]
-                    away_odds_cand = spreads["odds"][not home_index]
-                    home_pts_cand = spreads["points"][home_index]
-                    away_pts_cand = spreads["points"][not home_index]
-                    if sharp_home == 0.0 or site_key == 'pinnacle':
-                        sharp_home = home_odds_cand
-                        sharp_away = away_odds_cand
-                        sharp_points_home = home_pts_cand
-                        sharp_points_away = away_pts_cand
-                        sharp_source = site_key.upper()
-                elif market == "totals":
-                    totals = site["odds"]["totals"]
-                    positions = [p.lower() for p in totals["position"]]
-                    home_idx = positions.index("over")
-                    away_idx = positions.index("under")
-                    home_odds_cand = totals["odds"][home_idx]
-                    away_odds_cand = totals["odds"][away_idx]
-                    home_pts_cand = totals["points"][home_idx]
-                    away_pts_cand = totals["points"][away_idx]
-                    if sharp_home == 0.0 or site_key == 'pinnacle':
-                        sharp_home = home_odds_cand
-                        sharp_away = away_odds_cand
-                        sharp_points_home = home_pts_cand
-                        sharp_points_away = away_pts_cand
-                        sharp_source = site_key.upper()
+                for m in bookmaker.get("markets", []):
+                    if m["key"] == market:
+                        outcomes = m["outcomes"]
+                        
+                        if market == "totals":
+                            home_outcome = next((o for o in outcomes if o["name"] == "Over"), None)
+                            away_outcome = next((o for o in outcomes if o["name"] == "Under"), None)
+                        else:
+                            home_outcome = next((o for o in outcomes if o["name"] == home_team), None)
+                            away_outcome = next((o for o in outcomes if o["name"] == away_team), None)
+                            
+                        if not home_outcome or not away_outcome:
+                            continue
+                            
+                        home_odds_cand = home_outcome["price"]
+                        away_odds_cand = away_outcome["price"]
+                        home_pts_cand = home_outcome.get("point")
+                        away_pts_cand = away_outcome.get("point")
+                        
+                        if sharp_home == 0.0 or site_key == 'pinnacle':
+                            sharp_home = home_odds_cand
+                            sharp_away = away_odds_cand
+                            sharp_points_home = home_pts_cand
+                            sharp_points_away = away_pts_cand
+                            sharp_source = site_key.upper()
+                        break
             except (KeyError, ValueError):
                 continue
                 
         # 2. Line Shop Domestic Books
         if sharp_home > 0 and sharp_away > 0:
-            for site in game.get("sites", []):
+            for bookmaker in game.get("bookmakers", []):
                 try:
-                    site_key = site["site_key"].lower()
+                    site_key = bookmaker["key"].lower()
                     if site_key not in allowed_books:
                         continue
                         
-                    if market == "h2h":
-                        h2h = site["odds"]["h2h"]
-                        home_odds_cand = h2h[home_index]
-                        away_odds_cand = h2h[not home_index]
-                    elif market == "spreads":
-                        spreads = site["odds"]["spreads"]
-                        if spreads["points"][home_index] != sharp_points_home:
-                            continue # Points don't match sharp line
-                        home_odds_cand = spreads["odds"][home_index]
-                        away_odds_cand = spreads["odds"][not home_index]
-                    elif market == "totals":
-                        totals = site["odds"]["totals"]
-                        positions = [p.lower() for p in totals["position"]]
-                        home_idx = positions.index("over")
-                        away_idx = positions.index("under")
-                        if totals["points"][home_idx] != sharp_points_home:
-                            continue # Points don't match sharp line
-                        home_odds_cand = totals["odds"][home_idx]
-                        away_odds_cand = totals["odds"][away_idx]
+                    for m in bookmaker.get("markets", []):
+                        if m["key"] == market:
+                            outcomes = m["outcomes"]
+                            if market == "totals":
+                                home_outcome = next((o for o in outcomes if o["name"] == "Over"), None)
+                                away_outcome = next((o for o in outcomes if o["name"] == "Under"), None)
+                            else:
+                                home_outcome = next((o for o in outcomes if o["name"] == home_team), None)
+                                away_outcome = next((o for o in outcomes if o["name"] == away_team), None)
+                                
+                            if not home_outcome or not away_outcome:
+                                continue
+                                
+                            if market in ["spreads", "totals"]:
+                                if home_outcome.get("point") != sharp_points_home:
+                                    continue
+                                    
+                            home_odds_cand = home_outcome["price"]
+                            away_odds_cand = away_outcome["price"]
 
-                    if home_odds_cand > best_home_odds:
-                        best_home_odds = home_odds_cand
-                        best_home_site = site["site_key"]
-                        
-                    if away_odds_cand > best_away_odds:
-                        best_away_odds = away_odds_cand
-                        best_away_site = site["site_key"]
+                            if home_odds_cand > best_home_odds:
+                                best_home_odds = home_odds_cand
+                                best_home_site = bookmaker["key"]
+                                
+                            if away_odds_cand > best_away_odds:
+                                best_away_odds = away_odds_cand
+                                best_away_site = bookmaker["key"]
+                            break
                 except (KeyError, ValueError):
                     continue
 
@@ -234,32 +239,27 @@ class EVFinder:
                 logging.debug(f'Skipped #{game_num} - Missing commence_time')
                 continue
                 
-            game_time = epoch_to_est(commence_time)
+            game_time = string_to_est(commence_time)
             if not game_time:
                 continue # Skip if time conversion failed
             
+            # Safely identify Home and Away teams
+            home_team = game.get('home_team')
+            away_team = game.get('away_team')
+            if not home_team or not away_team:
+                logging.debug(f'Skipped #{game_num} - Missing team data')
+                continue
+
             # Exclude live or past games to avoid betting on unavailable lines
             if game_time < current_time:
                 if getattr(self, 'verbose', False):
-                    teams = game.get("teams", ["Unknown", "Unknown"])
-                    logging.debug(f'Skipped #{game_num} - {teams[0]} vs {teams[-1]} (Game is already live or past)')
-                continue
-            
-            # Safely identify Home and Away teams
-            try:
-                home_team_name = game['home_team']
-                home_index = 1 if home_team_name in game["teams"][1] else 0
-                
-                home_team = game["teams"][home_index]
-                away_team = game["teams"][not home_index]
-            except (KeyError, IndexError):
-                logging.debug(f'Skipped #{game_num} - Malformed team data: {game.get("teams")}')
+                    logging.debug(f'Skipped #{game_num} - {home_team} vs {away_team} (Game is already live or past)')
                 continue
                 
             market = game.get("market", "h2h")
 
             # Extract the sharp reference line and compare against domestic books
-            sharp_home, sharp_away, sharp_source, best_home_odds, best_away_odds, h_site, a_site, sharp_points_home, sharp_points_away = self.find_best_odds(game, home_index, market)
+            sharp_home, sharp_away, sharp_source, best_home_odds, best_away_odds, h_site, a_site, sharp_points_home, sharp_points_away = self.find_best_odds(game, market)
             
             # Format team names for pick output
             matchup_str = f"{away_team} @ {home_team}"
