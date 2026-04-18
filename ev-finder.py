@@ -24,7 +24,7 @@ def string_to_est(time_str):
         return None
 
 class EVFinder:
-    def __init__(self, leagues, markets, odds_variance, api_key, bankroll, sportsbook):
+    def __init__(self, leagues, markets, odds_variance, api_key, bankroll, sportsbooks=None):
         if isinstance(leagues, str):
             leagues = [leagues]
         self.leagues = [l.lower() for l in leagues]
@@ -34,14 +34,20 @@ class EVFinder:
         self.odds_variance = odds_variance
         self.api_key = api_key
         self.bankroll = bankroll
-        self.sportsbook = sportsbook
+        if sportsbooks is None:
+            self.sportsbooks = []
+        elif isinstance(sportsbooks, str):
+            self.sportsbooks = [sportsbooks.lower()]
+        else:
+            self.sportsbooks = [s.lower() for s in sportsbooks]
         self.session = requests.Session()
 
     def fetch_odds(self):
         all_data = []
         bookmakers_str = "pinnacle,betfair_ex_eu,betfair_ex_uk,marathonbet,draftkings,betmgm,fanduel"
-        if self.sportsbook and self.sportsbook.lower() not in bookmakers_str:
-            bookmakers_str += f",{self.sportsbook.lower()}"
+        for book in self.sportsbooks:
+            if book not in bookmakers_str:
+                bookmakers_str += f",{book}"
             
         for league in self.leagues:
             if league == "nba":
@@ -114,8 +120,8 @@ class EVFinder:
         home_team = game.get('home_team')
         away_team = game.get('away_team')
         
-        if self.sportsbook:
-            allowed_books = [self.sportsbook.lower()]
+        if self.sportsbooks:
+            allowed_books = self.sportsbooks
         else:
             allowed_books = ['draftkings', 'betmgm', 'fanduel']
 
@@ -417,7 +423,7 @@ def main():
     parser.add_argument('--market', type=str, nargs='+', default=['h2h', 'spreads', 'totals'], choices=['h2h', 'spreads', 'totals'], help='Market(s) to analyze (e.g. --market h2h spreads totals)')
     parser.add_argument('--variance', type=float, default=0.005, help='Odds variance modifier (no longer heavily used in devigging but preserved for extension)')
     parser.add_argument('--bankroll', type=float, default=100.00, help='Total bankroll available for Kelly sizing (default 100.00)')
-    parser.add_argument('--book', type=str, default=None, help='Target a specific sportsbook (e.g. fanduel, betmgm, draftkings)')
+    parser.add_argument('--book', type=str, nargs='+', default=None, help='Target specific sportsbook(s) (e.g. --book fanduel betmgm draftkings)')
     parser.add_argument('--verbose', action='store_true', help='Enable verbose debug logging')
     args = parser.parse_args()
 
@@ -432,7 +438,7 @@ def main():
     leagues_str = ", ".join(args.league).upper()
     markets_str = ", ".join(args.market).upper()
     logging.info(f"Initializing Top-Down EV Finder for {leagues_str} [{markets_str}]...")
-    finder = EVFinder(leagues=args.league, markets=args.market, odds_variance=args.variance, api_key=api_key, bankroll=args.bankroll, sportsbook=args.book)
+    finder = EVFinder(leagues=args.league, markets=args.market, odds_variance=args.variance, api_key=api_key, bankroll=args.bankroll, sportsbooks=args.book)
     finder.process_games()
 
 if __name__ == "__main__":

@@ -23,7 +23,7 @@ def string_to_est(time_str):
         return None
 
 class ArbitrageFinder:
-    def __init__(self, leagues, markets, api_key, sportsbook):
+    def __init__(self, leagues, markets, api_key, sportsbooks=None):
         if isinstance(leagues, str):
             leagues = [leagues]
         self.leagues = [l.lower() for l in leagues]
@@ -31,14 +31,20 @@ class ArbitrageFinder:
             markets = [markets]
         self.markets = [m.lower() for m in markets]
         self.api_key = api_key
-        self.sportsbook = sportsbook
+        if sportsbooks is None:
+            self.sportsbooks = []
+        elif isinstance(sportsbooks, str):
+            self.sportsbooks = [sportsbooks.lower()]
+        else:
+            self.sportsbooks = [s.lower() for s in sportsbooks]
         self.session = requests.Session()
 
     def fetch_odds(self):
         all_data = []
         bookmakers_str = "draftkings,betmgm,fanduel,pinnacle,marathonbet"
-        if self.sportsbook and self.sportsbook.lower() not in bookmakers_str:
-            bookmakers_str += f",{self.sportsbook.lower()}"
+        for book in self.sportsbooks:
+            if book not in bookmakers_str:
+                bookmakers_str += f",{book}"
             
         for league in self.leagues:
             if league == "nba":
@@ -111,8 +117,8 @@ class ArbitrageFinder:
         home_team = game.get('home_team')
         away_team = game.get('away_team')
         
-        if self.sportsbook:
-            allowed_books = [self.sportsbook.lower()]
+        if self.sportsbooks:
+            allowed_books = self.sportsbooks
         else:
             allowed_books = ['draftkings', 'betmgm', 'fanduel', 'pinnacle', 'marathonbet']
 
@@ -334,7 +340,7 @@ def main():
     parser = argparse.ArgumentParser(description="Arbitrage Finder - Cross-Book Arbitrage Strategy")
     parser.add_argument('--league', type=str, nargs='+', default=['nba'], choices=['nba', 'mlb', 'nhl', 'nfl'], help='League(s) to analyze (e.g. --league nba nhl)')
     parser.add_argument('--market', type=str, nargs='+', default=['h2h', 'spreads', 'totals'], choices=['h2h', 'spreads', 'totals'], help='Market(s) to analyze (e.g. --market h2h spreads totals)')
-    parser.add_argument('--book', type=str, default=None, help='Target a specific sportsbook (e.g. fanduel, betmgm, draftkings)')
+    parser.add_argument('--book', type=str, nargs='+', default=None, help='Target specific sportsbook(s) (e.g. --book fanduel betmgm draftkings)')
     parser.add_argument('--verbose', action='store_true', help='Enable verbose debug logging')
     args = parser.parse_args()
 
@@ -349,7 +355,7 @@ def main():
     leagues_str = ", ".join(args.league).upper()
     markets_str = ", ".join(args.market).upper()
     logging.info(f"Initializing Arbitrage Finder for {leagues_str} [{markets_str}]...")
-    finder = ArbitrageFinder(leagues=args.league, markets=args.market, api_key=api_key, sportsbook=args.book)
+    finder = ArbitrageFinder(leagues=args.league, markets=args.market, api_key=api_key, sportsbooks=args.book)
     finder.process_games()
 
 if __name__ == "__main__":
