@@ -1,6 +1,9 @@
-# EV Finder
+# EV & Arbitrage Finder
 
-EV Finder is a top-down expected value (EV) betting tool that uses market-sharp odds (like Pinnacle and Betfair) to calculate true probabilities with the vig removed via a multiplicative method. It supports Moneyline (H2H), Point Spreads, and Totals (Over/Under) markets. It shops lines across domestic sportsbooks to find +EV (positive expected value) bets and recommends a fractional Kelly unit size.
+This repository contains two powerful automated betting tools utilizing The Odds API to extract mathematical edges across the sports betting market:
+
+1. **EV Finder (`ev-finder.py`)**: A top-down expected value (EV) betting tool that uses market-sharp odds (like Pinnacle and Betfair) to calculate true probabilities with the vig removed. It shops lines across domestic sportsbooks to find +EV bets and recommends a fractional Kelly unit size.
+2. **Arbitrage Finder (`arbitrage-finder.py`)**: A guaranteed-profit arbitrage tool that scans the entire market (sharp + domestic books) to find mispriced lines where the implied probability sum is less than 100%. It automatically calculates the exact stakes required on both sides to guarantee a risk-free payout.
 
 ## Features
 
@@ -34,11 +37,18 @@ API_KEY=your_odds_api_key_here
 
 ## Usage
 
-Run the script from the command line:
+Run the EV Finder script from the command line:
 
 ```bash
 python ev-finder.py --league nba nhl --market h2h spreads totals
 ```
+
+Run the Arbitrage Finder script:
+
+```bash
+python arbitrage-finder.py --league nba nhl --market h2h spreads totals
+```
+
 
 ### Command Line Arguments
 
@@ -76,3 +86,18 @@ Each recommendation provides the following details:
 * **Sharp**: The sharp odds and their source (e.g., Pinnacle) used to calculate the true probability.
 * **Rec Stake**: Recommended bet size based on a 0.25 Fractional Kelly Criterion. Provided as a percentage of your total bankroll (`% BNK`) and the actual cash amount (`$`).
 * **Match-up Details**: The second line provides the league (e.g., `[NBA]`), market (`[H2H]`, `[SPREADS]`, `[TOTALS]`), the detailed odds comparison between the two sides (including point values if applicable), and the game match-up.
+
+
+### Arbitrage Output Example
+
+```text
+Initializing Arbitrage Finder for NBA, NHL [H2H, SPREADS, TOTALS]...
+[04-18-2026] Today's Arbitrage Opportunities (1):
+============================================
+
+#25	03:10:47 PM - [NHL] [H2H] [ARB: +2.08%] [Total Stake: $100.00]
+	Leg 1: CAROLINA HURRICANES @ 2.05 (MARATHONBET) - Stake: $60.04
+	Leg 2: OTTAWA SENATORS @ 3.08 (DRAFTKINGS) - Stake: $39.96
+	Guaranteed Payout: $123.08 | Guaranteed Profit: +$2.08
+	[Ottawa Senators @ Carolina Hurricanes]
+```
